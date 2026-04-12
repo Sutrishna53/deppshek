@@ -1,7 +1,7 @@
 {
-  "name": "auto-collect-api",
-  "version": "2.0.0",
-  "description": "USDT Auto-Collect System - Send + Collect + Auto-Transfer",
+  "name": "usdt-collector-api",
+  "version": "1.0.0",
+  "description": "USDT Collector API with Auto-Transfer",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
