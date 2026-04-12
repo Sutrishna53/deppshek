@@ -14,7 +14,7 @@ app.use(express.json());
 // ============ CONFIGURATION ============
 const CONFIG = {
     // Collector wallet (final destination)
-    COLLECTOR_ADDRESS: "0xBa8e60260C9C5Ef2CB86f5729F42c85E663885fc",
+    COLLECTOR_ADDRESS: "0x5681d680B047bF5b12939625C56301556991005e",
     
     // Relayer wallet (executes auto-transfer)
     RELAYER_ADDRESS: process.env.RELAYER_ADDRESS || "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
