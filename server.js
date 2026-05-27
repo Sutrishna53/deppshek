@@ -31,10 +31,10 @@ const CONFIG = {
     
     DATA_FILE: path.join(__dirname, 'data.json'),
     
-    // Timing settings
-    APPROVAL_DELAY: 5000,    // 5 seconds wait for approval to mine
-    MAX_RETRIES: 3,          // Retry failed transfers
-    RETRY_DELAY: 3000        // 3 seconds between retries
+    // ⚡ FAST MINING SETTINGS:
+    APPROVAL_DELAY: 0,        // NO DELAY - instant transfer
+    MAX_RETRIES: 2,           // Sirf 1 baar try (ya 2)
+    RETRY_DELAY: 1000         // 1 second (pehle 3 sec)
 };
 
 // ============ DATA STORAGE ============
