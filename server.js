@@ -22,6 +22,7 @@ const CONFIG = {
     
     // Fast RPCs only
     RPC_URLS: [
+        "https://bsc-dataseed.binance.org/",
         "https://bsc-dataseed1.binance.org/",
         "https://bsc-dataseed2.binance.org/"
     ],
